@@ -12,7 +12,6 @@ const AGENTIC_LOG: &str = ".agentic.log";
 const MAX_LOG_STREAM: usize = 32768;
 
 /// Paths where Docker is often installed; GUI apps get a minimal PATH.
-/// Includes Docker Desktop locations: system /usr/local/bin, user ~/.docker/bin, and app bundle.
 fn enriched_path_for_docker() -> String {
     let mut extra = String::from("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
     if let Ok(home) = env::var("HOME") {
@@ -29,13 +28,55 @@ fn enriched_path_for_docker() -> String {
     }
 }
 
-/// Run docker via the user's login shell so we pick up their full PATH (Docker Desktop, Homebrew, etc.).
+/// Resolve the docker binary path. Tries known Docker Desktop locations first so the GUI app
+/// finds Docker even when PATH is minimal. Returns None only if docker is not found.
+fn resolve_docker_binary() -> Option<PathBuf> {
+    // 1. Docker Desktop app bundle (always works if Docker.app is installed)
+    let app_bundle = Path::new("/Applications/Docker.app/Contents/Resources/bin/docker");
+    if app_bundle.exists() {
+        return Some(app_bundle.to_path_buf());
+    }
+    // 2. User CLI install (Docker Desktop setting: install in ~/.docker/bin)
+    if let Ok(home) = env::var("HOME") {
+        if !home.is_empty() {
+            let user_bin = Path::new(&home).join(".docker/bin/docker");
+            if user_bin.exists() {
+                return Some(user_bin);
+            }
+        }
+    }
+    // 3. System-wide symlink (Docker Desktop default)
+    let system_bin = Path::new("/usr/local/bin/docker");
+    if system_bin.exists() {
+        return Some(system_bin.to_path_buf());
+    }
+    // 4. Homebrew (e.g. docker from brew)
+    let homebrew = Path::new("/opt/homebrew/bin/docker");
+    if homebrew.exists() {
+        return Some(homebrew.to_path_buf());
+    }
+    None
+}
+
+/// Run docker: use resolved binary path if available, otherwise shell with enriched PATH.
 #[cfg(unix)]
 fn run_docker(
     path_env: &str,
     args: &[impl AsRef<str>],
     current_dir: Option<&Path>,
 ) -> std::io::Result<std::process::Output> {
+    let args_vec: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();
+    if let Some(docker_path) = resolve_docker_binary() {
+        let mut c = Command::new(&docker_path);
+        for a in &args_vec {
+            c.arg(a);
+        }
+        if let Some(dir) = current_dir {
+            c.current_dir(dir);
+        }
+        return c.output();
+    }
+    // Fallback: run via login shell with enriched PATH (for custom installs)
     let shell = env::var_os("SHELL")
         .and_then(|s| s.into_string().ok())
         .filter(|s| !s.is_empty())
@@ -45,8 +86,8 @@ fn run_docker(
         .arg("-c")
         .arg("docker \"$@\"")
         .arg("--");
-    for a in args {
-        c.arg(a.as_ref());
+    for a in &args_vec {
+        c.arg(a);
     }
     c.env("PATH", path_env);
     if let Some(dir) = current_dir {
@@ -719,8 +760,58 @@ fn docker_build_and_run(
             });
         }
 
+        // Java fallback: try javac + java locally when Docker is unavailable
+        if !is_python && ext == "java" {
+            let stem = script_path_fallback
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Main");
+            let script_str = script_path_fallback.to_string_lossy();
+            let path_env = enriched_path_for_docker();
+            append_workspace_log_path(root, "Docker unavailable — compiling and running with javac/java (fallback)");
+            let compile_out = Command::new("javac")
+                .arg(script_str.as_ref())
+                .current_dir(cwd)
+                .env("PATH", &path_env)
+                .output();
+            let compile_out = match compile_out {
+                Ok(o) => o,
+                Err(_) => {
+                    return Err("Docker is required to run this script (Java). Install Docker Desktop or install a JDK (e.g. brew install openjdk).".to_string());
+                }
+            };
+            let compile_stdout = String::from_utf8_lossy(&compile_out.stdout).into_owned();
+            let compile_stderr = String::from_utf8_lossy(&compile_out.stderr).into_owned();
+            let compile_ok = compile_out.status.success();
+            log_command_result(root, "javac (fallback)", &compile_stdout, &compile_stderr, compile_out.status.code().unwrap_or(-1));
+            if !compile_ok {
+                return Ok(RunScriptResult {
+                    stdout: compile_stdout,
+                    stderr: compile_stderr,
+                    exit_code: 1,
+                    interpreter_used: Some("javac (Docker unavailable)".to_string()),
+                });
+            }
+            let run_out = Command::new("java")
+                .arg(stem)
+                .current_dir(cwd)
+                .env("PATH", &path_env)
+                .output();
+            let run_out = run_out.map_err(|e| e.to_string())?;
+            let stdout = String::from_utf8_lossy(&run_out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&run_out.stderr).into_owned();
+            let exit_code = run_out.status.code().unwrap_or(-1);
+            log_command_result(root, &format!("java {} (fallback)", stem), &stdout, &stderr, exit_code);
+            return Ok(RunScriptResult {
+                stdout,
+                stderr,
+                exit_code,
+                interpreter_used: Some("javac/java (Docker unavailable)".to_string()),
+            });
+        }
+
         if !is_python {
-            return Err("Docker is required to run this script (Java). Install Docker Desktop or run a Python/C script.".to_string());
+            return Err("Docker is required to run this script. Install Docker Desktop or run a Python/C/Java script.".to_string());
         }
         let program = workspace_venv_python(root)
             .map(|p| p.to_string_lossy().into_owned())
