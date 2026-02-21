@@ -12,14 +12,20 @@ const AGENTIC_LOG: &str = ".agentic.log";
 const MAX_LOG_STREAM: usize = 32768;
 
 /// Paths where Docker is often installed; GUI apps get a minimal PATH.
-const DOCKER_PATH_PREFIX: &str = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin";
-
+/// Includes Docker Desktop locations: system /usr/local/bin, user ~/.docker/bin, and app bundle.
 fn enriched_path_for_docker() -> String {
+    let mut extra = String::from("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
+    if let Ok(home) = env::var("HOME") {
+        if !home.is_empty() {
+            extra.push_str(&format!(":{}/.docker/bin", home));
+        }
+    }
+    extra.push_str(":/Applications/Docker.app/Contents/Resources/bin");
     let existing = env::var_os("PATH").and_then(|v| v.into_string().ok()).unwrap_or_default();
     if existing.is_empty() {
-        DOCKER_PATH_PREFIX.to_string()
+        extra
     } else {
-        format!("{}:{}", DOCKER_PATH_PREFIX, existing)
+        format!("{}:{}", extra, existing)
     }
 }
 
@@ -30,7 +36,11 @@ fn run_docker(
     args: &[impl AsRef<str>],
     current_dir: Option<&Path>,
 ) -> std::io::Result<std::process::Output> {
-    let mut c = Command::new("/bin/bash");
+    let shell = env::var_os("SHELL")
+        .and_then(|s| s.into_string().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let mut c = Command::new(&shell);
     c.arg("-l")
         .arg("-c")
         .arg("docker \"$@\"")
@@ -640,10 +650,77 @@ fn docker_build_and_run(
         }
         let script_path_fallback = path_under_workspace(root, rel).map_err(|e| e.to_string())?;
         let cwd = script_path_fallback.parent().unwrap_or(root);
-        // Venv fallback only for Python; C/C++/Java require Docker
         let is_python = run_cmd.first().map(|s| s.as_str()) == Some("python3");
+        let ext = script_path_fallback.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_c = ext == "c";
+        let is_cpp = ext == "cpp" || ext == "cc" || ext == "cxx";
+
+        // C/C++ fallback: try gcc/g++ or clang locally when Docker is unavailable
+        if !is_python && (is_c || is_cpp) {
+            let script_str = script_path_fallback.to_string_lossy();
+            let out_bin = std::env::temp_dir().join("agentic_c_run");
+            let out_str = out_bin.to_string_lossy();
+            let (compiler_name, compile_ok, compile_stdout, compile_stderr) = {
+                let gcc = if is_cpp { "g++" } else { "gcc" };
+                match Command::new(gcc)
+                    .args(["-o", out_str.as_ref(), script_str.as_ref()])
+                    .current_dir(cwd)
+                    .output()
+                {
+                    Ok(o) => (
+                        gcc.to_string(),
+                        o.status.success(),
+                        String::from_utf8_lossy(&o.stdout).into_owned(),
+                        String::from_utf8_lossy(&o.stderr).into_owned(),
+                    ),
+                    Err(_) => {
+                        let clang = if is_cpp { "clang++" } else { "clang" };
+                        match Command::new(clang)
+                            .args(["-o", out_str.as_ref(), script_str.as_ref()])
+                            .current_dir(cwd)
+                            .output()
+                        {
+                            Ok(o) => (
+                                clang.to_string(),
+                                o.status.success(),
+                                String::from_utf8_lossy(&o.stdout).into_owned(),
+                                String::from_utf8_lossy(&o.stderr).into_owned(),
+                            ),
+                            Err(_) => {
+                                return Err("Docker is required to run this script (C/C++). Install Docker Desktop or install gcc/clang (e.g. xcode-select --install or brew install gcc).".to_string());
+                            }
+                        }
+                    }
+                }
+            };
+            append_workspace_log_path(root, &format!("Docker unavailable — compiling and running with {} (fallback)", compiler_name));
+            log_command_result(root, &format!("Compile ({} fallback)", compiler_name), &compile_stdout, &compile_stderr, if compile_ok { 0 } else { 1 });
+            if !compile_ok {
+                let _ = std::fs::remove_file(&out_bin);
+                return Ok(RunScriptResult {
+                    stdout: compile_stdout,
+                    stderr: compile_stderr,
+                    exit_code: 1,
+                    interpreter_used: Some(format!("{} (Docker unavailable)", compiler_name)),
+                });
+            }
+            let run_out = Command::new(out_str.as_ref()).current_dir(cwd).output();
+            let _ = std::fs::remove_file(&out_bin);
+            let run_out = run_out.map_err(|e| e.to_string())?;
+            let stdout = String::from_utf8_lossy(&run_out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&run_out.stderr).into_owned();
+            let exit_code = run_out.status.code().unwrap_or(-1);
+            log_command_result(root, &format!("Run (fallback): {}", rel), &stdout, &stderr, exit_code);
+            return Ok(RunScriptResult {
+                stdout,
+                stderr,
+                exit_code,
+                interpreter_used: Some(format!("{} (Docker unavailable)", compiler_name)),
+            });
+        }
+
         if !is_python {
-            return Err("Docker is required to run this script (C/C++/Java). Install Docker Desktop or run a Python script.".to_string());
+            return Err("Docker is required to run this script (Java). Install Docker Desktop or run a Python/C script.".to_string());
         }
         let program = workspace_venv_python(root)
             .map(|p| p.to_string_lossy().into_owned())
