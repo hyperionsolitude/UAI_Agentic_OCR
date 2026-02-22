@@ -8,20 +8,51 @@ A **free and open source** desktop app that brings [OCR_GPT](https://github.com/
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) (LTS)
-- [Rust](https://www.rust-lang.org/tools/install) (for Tauri)
-- [Groq API key](https://console.groq.com/)
+Install these before building or developing:
+
+| Prerequisite | Purpose | Install |
+|-------------|---------|---------|
+| **Node.js** (LTS) | Frontend (React, Vite) and npm | [nodejs.org](https://nodejs.org/) or `nvm install --lts` |
+| **Rust** | Tauri desktop backend | [rustup.rs](https://rustup.rs/) — run `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **Groq API key** | AI chat (no install) | [console.groq.com](https://console.groq.com/) — paste in app on first run |
+
+Optional (for agentic “create and run” examples):
+
+| Optional | Purpose |
+|----------|---------|
+| **Docker Desktop** | Run Python/C/Java scripts in containers (recommended). [docker.com](https://www.docker.com/products/docker-desktop) |
+| **Xcode Command Line Tools** (macOS) | C/C++ fallback when Docker isn’t used: `xcode-select --install` |
+| **JDK** (e.g. OpenJDK) | Java fallback when Docker isn’t used: `brew install openjdk` |
 
 ## Quick start
 
+**Option A — automated setup (macOS):**
+
 ```bash
-git clone <this-repo>
-cd Agentic_GPT_Conversion
+git clone https://github.com/hyperionsolitude/UAI_Agentic_OCR.git
+cd UAI_Agentic_OCR
+./scripts/setup-dev.sh              # install Node, Rust, run npm install
+./scripts/setup-dev.sh --all         # also install Docker, Java, Xcode CLI (optional)
+```
+
+**Option B — manual:**
+
+```bash
+git clone https://github.com/hyperionsolitude/UAI_Agentic_OCR.git
+cd UAI_Agentic_OCR
 npm install
 npm run tauri dev
 ```
 
 On first run, enter your Groq API key in the header. Pick a **workspace** folder when you want to use agentic file edits.
+
+To build a release app (macOS: `.app` + DMG):
+
+```bash
+npm run tauri build
+# Or use the helper script (build + launch .app):
+./rebuild-and-run.sh
+```
 
 ## Usage
 
