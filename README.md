@@ -54,6 +54,17 @@ npm run tauri build
 ./rebuild-and-run.sh
 ```
 
+### CI: build for all OS on GitHub
+
+Every push to `main` (and pull requests) triggers a workflow that builds the app for **macOS (Intel + Apple Silicon), Windows, and Linux**. Download installers from the [Actions](https://github.com/hyperionsolitude/UAI_Agentic_OCR/actions) run summary (Artifacts).
+
+To **publish a GitHub Release** with installers attached, push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Usage
 
 1. **OCR**: Click “OCR from image” and select an image; extracted text is added to the chat input.
