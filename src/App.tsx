@@ -129,6 +129,15 @@ If the user is not asking for a file to be created, removed, removed all, listed
 
 const STORAGE_API_KEY = "agentic-ocr-gpt-api-key";
 const STORAGE_MODEL = "agentic-ocr-gpt-model";
+const STORAGE_SESSIONS_INDEX = "agentic-ocr-gpt-sessions";
+const STORAGE_SESSION_PREFIX = "agentic-ocr-gpt-session:";
+
+type ChatSessionMeta = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+};
 
 function App() {
   const [apiKey, setApiKey] = useState(
@@ -142,6 +151,18 @@ function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null);
   const [agenticMode, setAgenticMode] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<ChatSessionMeta[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_SESSIONS_INDEX);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as ChatSessionMeta[];
+      if (!Array.isArray(parsed)) return [];
+      return parsed;
+    } catch {
+      return [];
+    }
+  });
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [lastFailedUserMessage, setLastFailedUserMessage] = useState<string | null>(null);
@@ -198,6 +219,66 @@ function App() {
   };
   const [autoRunStatus, setAutoRunStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const persistSessionsIndex = (next: ChatSessionMeta[]) => {
+    setSessions(next);
+    try {
+      localStorage.setItem(STORAGE_SESSIONS_INDEX, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const persistSessionSnapshot = (nextMessages: Message[]) => {
+    if (nextMessages.length === 0) return;
+    const firstUser = nextMessages.find((m) => m.role === "user");
+    const titleSource = firstUser?.content.trim().split("\n")[0] || "New chat";
+    const title = titleSource.length > 80 ? titleSource.slice(0, 80) + "…" : titleSource;
+    const now = Date.now();
+    let id = currentSessionId;
+    let nextSessions = sessions;
+    if (!id) {
+      id = String(now);
+      const meta: ChatSessionMeta = { id, title, createdAt: now, updatedAt: now };
+      nextSessions = [meta, ...sessions];
+      setCurrentSessionId(id);
+    } else {
+      nextSessions = sessions.map((s) =>
+        s.id === id ? { ...s, title, updatedAt: now } : s
+      );
+    }
+    persistSessionsIndex(nextSessions);
+    try {
+      localStorage.setItem(STORAGE_SESSION_PREFIX + id, JSON.stringify(nextMessages));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const startNewSession = () => {
+    setCurrentSessionId(null);
+    setMessages([]);
+  };
+
+  const openSession = (id: string) => {
+    setCurrentSessionId(id);
+  };
+
+  const deleteSession = (id: string) => {
+    if (!confirm(`Delete conversation permanently?`)) return;
+    const next = sessions.filter((s) => s.id !== id);
+    persistSessionsIndex(next);
+    try {
+      localStorage.removeItem(STORAGE_SESSION_PREFIX + id);
+    } catch {
+      /* ignore */
+    }
+    if (currentSessionId === id) {
+      setCurrentSessionId(null);
+      setMessages([]);
+    }
+  };
 
   const saveApiKey = (v: string) => {
     setApiKey(v);
@@ -220,6 +301,29 @@ function App() {
     const path = Array.isArray(selected) ? selected[0] : selected;
     if (path && typeof path === "string") setWorkspaceRoot(path);
   };
+
+  // Load messages for current session on mount / when session changes
+  useEffect(() => {
+    if (!currentSessionId) {
+      setMessages([]);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(STORAGE_SESSION_PREFIX + currentSessionId);
+      if (!raw) {
+        setMessages([]);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Message[];
+      if (Array.isArray(parsed)) {
+        setMessages(parsed);
+      } else {
+        setMessages([]);
+      }
+    } catch {
+      setMessages([]);
+    }
+  }, [currentSessionId]);
 
   useEffect(() => {
     if (!workspaceRoot) return;
@@ -397,6 +501,7 @@ function App() {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last?.role === "assistant") next[next.length - 1] = { ...last, content: resultContent };
+          persistSessionSnapshot(next);
           return next;
         });
         if (result.usage) setLastUsage(result.usage);
@@ -412,6 +517,7 @@ function App() {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last?.role === "assistant") next[next.length - 1] = { ...last, content: resultContent };
+          persistSessionSnapshot(next);
           return next;
         });
         if (result.usage) setLastUsage(result.usage);
@@ -1050,6 +1156,7 @@ function App() {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last?.role === "assistant") next[next.length - 1] = { ...last, content: result.content };
+          persistSessionSnapshot(next);
           return next;
         });
         if (result.usage) setLastUsage(result.usage);
@@ -1064,6 +1171,7 @@ function App() {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last?.role === "assistant") next[next.length - 1] = { ...last, content: result.content };
+          persistSessionSnapshot(next);
           return next;
         });
         if (result.usage) setLastUsage(result.usage);
@@ -1190,6 +1298,16 @@ function App() {
           >
             {showHelp ? "Hide help" : "Help"}
           </button>
+          {sessions.length > 0 && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setShowHistory(true)}
+              title="View or manage previous conversations"
+            >
+              History
+            </button>
+          )}
         </div>
       </header>
 
@@ -1732,6 +1850,78 @@ function App() {
           )}
         </form>
       </div>
+      {showHistory && (
+        <div className="history-overlay" onClick={() => setShowHistory(false)}>
+          <div
+            className="history-panel"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Conversation history"
+          >
+            <div className="history-header">
+              <h3>Conversation history</h3>
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => {
+                  startNewSession();
+                  setShowHistory(false);
+                }}
+              >
+                New chat
+              </button>
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => setShowHistory(false)}
+              >
+                Close
+              </button>
+            </div>
+            {sessions.length === 0 ? (
+              <p className="history-empty">No previous conversations yet.</p>
+            ) : (
+              <div className="history-list">
+                {sessions.map((s) => (
+                  <div
+                    key={s.id}
+                    className={
+                      "history-item" +
+                      (s.id === currentSessionId ? " active" : "")
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="history-title"
+                      onClick={() => {
+                        openSession(s.id);
+                        setShowHistory(false);
+                      }}
+                      title={s.title}
+                    >
+                      {s.title}
+                    </button>
+                    <div className="history-meta">
+                      <span>
+                        {new Date(s.updatedAt || s.createdAt).toLocaleString()}
+                      </span>
+                      <button
+                        type="button"
+                        className="history-delete"
+                        onClick={() => deleteSession(s.id)}
+                        title="Delete conversation"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

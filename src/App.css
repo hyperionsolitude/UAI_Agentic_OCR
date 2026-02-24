@@ -44,6 +44,132 @@
   margin-left: auto;
 }
 
+.history-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.history-panel {
+  background: #18181b;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  max-width: 640px;
+  width: 100%;
+  max-height: 80vh;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.history-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  background: #18181b;
+  border: 1px solid #27272a;
+}
+
+.history-item.active {
+  border-color: var(--accent-color, #4ade80);
+}
+
+.history-title {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+  padding: 0;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: #a1a1aa;
+}
+
+.history-delete {
+  padding: 0.1rem 0.45rem;
+}
+
+.history-empty {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: #a1a1aa;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.session-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.session-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.session-chip {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip.active {
+  font-weight: 600;
+  border-color: var(--accent-color);
+}
+
+.session-delete {
+  margin-left: 2px;
+  padding: 0 4px;
+}
+
 .checkbox {
   display: flex;
   align-items: center;
