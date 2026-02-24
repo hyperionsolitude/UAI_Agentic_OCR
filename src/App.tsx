@@ -131,6 +131,7 @@ const STORAGE_API_KEY = "agentic-ocr-gpt-api-key";
 const STORAGE_MODEL = "agentic-ocr-gpt-model";
 const STORAGE_SESSIONS_INDEX = "agentic-ocr-gpt-sessions";
 const STORAGE_SESSION_PREFIX = "agentic-ocr-gpt-session:";
+const STORAGE_EXPERT_MODE = "agentic-ocr-gpt-expert-mode";
 
 type ChatSessionMeta = {
   id: string;
@@ -218,9 +219,17 @@ function App() {
     setAutoApplyAndRunState(v);
     localStorage.setItem("agentic-auto-apply-and-run", v ? "true" : "false");
   };
+  const [expertMode, setExpertModeState] = useState(
+    () => localStorage.getItem(STORAGE_EXPERT_MODE) === "true"
+  );
   const [autoRunStatus, setAutoRunStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showHistory, setShowHistory] = useState(false);
+
+  const setExpertMode = (v: boolean) => {
+    setExpertModeState(v);
+    localStorage.setItem(STORAGE_EXPERT_MODE, v ? "true" : "false");
+  };
 
   const persistSessionsIndex = (next: ChatSessionMeta[]) => {
     setSessions(next);
@@ -485,6 +494,11 @@ function App() {
           ". If they ask which model is selected, what model is being used, or similar, answer with this model name (e.g. \"The current model is " +
           model +
           ".\").";
+        if (expertMode) {
+          systemPrompt =
+            systemPrompt +
+            "\n\nExpert mode: You may freely choose among the available actions (file:, list:, remove:, remove-all:, pip-install:, install-requirements:, run:, run-docker:, run-docker-build:, create-venv:) to best satisfy the user's request, instead of following any default preference (e.g. always using Docker). Always keep to the defined block formats and safety rules (no wildcards for remove:, no shell commands in run:, no new block types).";
+        }
       }
       if (workspaceRoot && systemPrompt) {
         try {
@@ -1156,6 +1170,11 @@ function App() {
         "\n\nThe user's currently selected chat model is: " +
         model +
         ". If they ask which model is selected, what model is being used, or similar, answer with this model name.";
+      if (expertMode) {
+        systemPrompt =
+          systemPrompt +
+          "\n\nExpert mode: You may freely choose among the available actions (file:, list:, remove:, remove-all:, pip-install:, install-requirements:, run:, run-docker:, run-docker-build:, create-venv:) to best satisfy the user's request, instead of following any default preference (e.g. always using Docker). Always keep to the defined block formats and safety rules (no wildcards for remove:, no shell commands in run:, no new block types).";
+      }
     }
     const chatMessages: Message[] = [
       ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
@@ -1279,6 +1298,14 @@ function App() {
               onChange={(e) => setAutoApplyAndRun(e.target.checked)}
             />
             Auto-apply &amp; run
+          </label>
+          <label className="checkbox" title="Relax command guidance so the model can choose any allowed action (file/run/pip/Docker/etc.) within safety rules">
+            <input
+              type="checkbox"
+              checked={expertMode}
+              onChange={(e) => setExpertMode(e.target.checked)}
+            />
+            Expert mode (commands)
           </label>
           {lastUsage && (
             <span className="token-usage" title="Last response token usage">
