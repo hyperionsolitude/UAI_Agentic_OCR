@@ -16,6 +16,7 @@ const FILE_BLOCK_REGEX = /```file:([^\n]+)\n([\s\S]*?)```/g;
 const REMOVE_BLOCK_REGEX = /```remove:([^\n`]+)\s*```/g;
 const LIST_BLOCK_REGEX = /```list:(?:([^\n`]*?))\s*```/g;
 const REMOVE_ALL_BLOCK_REGEX = /```remove-all:(?:([^\n`]*?))\s*```/g;
+const REMOVE_MATCHING_BLOCK_REGEX = /```remove-matching:(?:([^\n`]*?))\s*```/g;
 const INSTALL_REQUIREMENTS_REGEX = /```install-requirements:(?:([^\n`]*?))\s*```/g;
 const PIP_INSTALL_REGEX = /```pip-install:(?:([^\n`]*?))\s*```/g;
 const READ_BLOCK_REGEX = /```read:(?:([^\n`]+?))\s*```/g;
@@ -34,7 +35,7 @@ export function parseFileEdits(text: string): FileEdit[] {
   return edits;
 }
 
-/** Paths that are glob/regex patterns, not real file paths — don't offer as removals. */
+/** Paths that look like glob/regex patterns, not concrete file paths. */
 const REMOVE_PATTERN_BLACKLIST = /^\.\*$|[\*?\[\]]/;
 
 /** Parse ```remove:path``` blocks from AI response (for agentic file removal). */
@@ -44,7 +45,9 @@ export function parseRemoveEdits(text: string): string[] {
   REMOVE_BLOCK_REGEX.lastIndex = 0;
   while ((m = REMOVE_BLOCK_REGEX.exec(text)) !== null) {
     const path = m[1].trim();
-    if (path && !paths.includes(path) && !REMOVE_PATTERN_BLACKLIST.test(path)) paths.push(path);
+    if (path && !paths.includes(path) && !REMOVE_PATTERN_BLACKLIST.test(path)) {
+      paths.push(path);
+    }
   }
   return paths;
 }
@@ -68,9 +71,30 @@ export function parseRemoveAllRequests(text: string): string[] {
   REMOVE_ALL_BLOCK_REGEX.lastIndex = 0;
   while ((m = REMOVE_ALL_BLOCK_REGEX.exec(text)) !== null) {
     const path = (m[1] || "").trim() || ".";
-    if (!paths.includes(path)) paths.push(path);
+    // Guardrails: remove-all is for directories (".", "subfolder"), not file types or globs.
+    // Common wrong outputs like "remove-all:*.mp4" or "remove-all:.mp4" should be ignored.
+    const looksLikeGlob = /[\*\?\[\]]/.test(path);
+    const looksLikeBareExtension = /^\.[A-Za-z0-9]+$/.test(path);
+    if (!looksLikeGlob && !looksLikeBareExtension && !paths.includes(path)) paths.push(path);
   }
   return paths;
+}
+
+/** Parse ```remove-matching:pattern``` blocks (e.g. "*.mp4" or "videos/*.mp4"). Returns the raw patterns. */
+export function parseRemoveMatchingRequests(text: string): string[] {
+  const patterns: string[] = [];
+  let m: RegExpExecArray | null;
+  REMOVE_MATCHING_BLOCK_REGEX.lastIndex = 0;
+  while ((m = REMOVE_MATCHING_BLOCK_REGEX.exec(text)) !== null) {
+    let pattern = (m[1] || "").trim();
+    if (!pattern) continue;
+    // Normalize bare extensions like ".mp4" to "*.mp4" so they behave as expected.
+    if (/^\.[A-Za-z0-9]+$/.test(pattern)) {
+      pattern = `*${pattern}`;
+    }
+    if (!patterns.includes(pattern)) patterns.push(pattern);
+  }
+  return patterns;
 }
 
 /** Parse ```install-requirements:path``` (path optional, default "requirements.txt"). */

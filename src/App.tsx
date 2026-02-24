@@ -8,6 +8,7 @@ import {
   parseRemoveEdits,
   parseListRequests,
   parseRemoveAllRequests,
+  parseRemoveMatchingRequests,
   parseInstallRequirements,
   parsePipInstall,
   parseReadRequests,
@@ -40,15 +41,27 @@ function looksLikeRequirementsFilePath(path: string): boolean {
   return p.includes("/") || p.includes("\\") || /\.(txt|req|in)$/i.test(p);
 }
 
-const AGENTIC_SYSTEM = `You are a helpful assistant. When the user asks for a file to be created or saved "in the workspace" (or similar), you MUST output it using this EXACT format so the app can create the file. No other format will work.
+function matchesSimpleGlob(name: string, pattern: string): boolean {
+  // Support "*" and "?" in a simple, case-sensitive way.
+  const escaped = pattern.replace(/[-/\\^$+?.()|[\]{}]/g, "\\$&");
+  const regex = new RegExp("^" + escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".") + "$");
+  return regex.test(name);
+}
 
-Format (path is relative to the user's workspace folder):
+const AGENTIC_SYSTEM = `You are a professional, senior-level coding assistant working inside a local IDE agent. You work carefully but efficiently, and you treat the user's filesystem as real and important (no imaginary files, no destructive guesses). When the user asks for a file to be created, edited, moved, or saved "in the workspace" (or similar), you MUST output it using the EXACT formats below so the app can perform the operation. No other format will work.
+
+High-level behavior:
+- Prefer clear, structured answers with short explanations followed by concrete steps or code.
+- When a request is ambiguous (especially around rename/remove/edit/copy), briefly state the assumption you are making and choose the safest reasonable behavior.
+- For multi-step workspace changes (e.g. larger refactors), describe the plan in 1–3 bullets before emitting any tool blocks.
+- Never fabricate tool results or file contents; if you are missing information, request it via \`\`\`read:path\`\`\` or by asking the user.
+
+Format for creating or overwriting a file (path is relative to the user's workspace folder):
 
 \`\`\`file:FILENAME
 full file content here
 \`\`\`
-
-Rules:
+Rules (workspace actions):
 - For each request that involves creating and/or running a script (Python, C, C++, Java, or other): build and run in Docker. Output \`\`\`file:Dockerfile\`\`\` (use the right base image: python:3.11 for Python with RUN pip install as needed; gcc for C/C++; openjdk for Java), \`\`\`file:script.py\`\`\` or \`\`\`file:main.c\`\`\` / \`\`\`file:Main.java\`\`\` etc. if creating, then \`\`\`run-docker-build:path/to/script\`\`\`. Do not use \`\`\`pip-install\`\`\` + \`\`\`run\`\`\` unless the user explicitly says "run locally" or "without Docker".
 - Each action (file, remove, list, pip-install, run, etc.) must be in its OWN \`\`\`...\`\`\` block. Never put two actions in one block (e.g. never \`\`\`pip-install: requests\\nrun:script.py\`\`\` — use two separate blocks).
 - Use \`\`\`file:filename\`\`\` (with "file:" right after the backticks and the filename). Example: \`\`\`file:hanoi.py
@@ -69,6 +82,8 @@ When the user asks to remove ALL files, clear the workspace, "remove ./*", "remo
 \`\`\`
 (Use \`\`\`remove-all:.\`\`\` for workspace root, or \`\`\`remove-all:subfolder\`\`\` to clear a subfolder.) The app will then list and remove all items after confirmation.
 
+When the user asks to remove ALL files of a specific type (e.g. "remove all mp4", "delete all *.log"), do NOT use \`\`\`remove-all:\`\`\`. Instead use \`\`\`remove-matching:*.ext\`\`\` (example: \`\`\`remove-matching:*.mp4\`\`\`) so the app can preview matches and confirm.
+
 When the user asks to LIST FILES, show workspace contents, or "what's in my workspace", output this so the app will show the real file list:
 \`\`\`list:.
 \`\`\`
@@ -86,6 +101,26 @@ When the user asks to READ or OPEN a file in the workspace (to see its contents,
 \`\`\`read:path/to/file
 \`\`\`
 The app will read the file and give you its contents in a follow-up turn so you can respond.
+
+When the user asks to EDIT an existing file, you have two options:
+- If you can safely reconstruct the full desired file, output a single \`\`\`file:path\`\`\` block with the COMPLETE new contents (not a diff or patch).
+- If you need to see the current contents first, output \`\`\`read:path\`\`\`, wait for the follow-up with the real file content, then respond with a \`\`\`file:path\`\`\` block containing the fully updated file.
+Never output partial edits or diff-style patches — always the full file content.
+
+When the user asks to RENAME or MOVE a file (e.g. "rename a.py to b.py" or "move src/app.py to src/legacy/app.py"):
+- First, request the current contents with \`\`\`read:old_path
+\`\`\`.
+- After you receive the file contents in a follow-up, create the new file with the same (or modified) contents using \`\`\`file:new_path
+\`\`\`.
+- Optionally, delete the old file with \`\`\`remove:old_path
+\`\`\` if the user asked for a true rename/move instead of a copy.
+
+When the user asks to COPY or DUPLICATE a file (e.g. "copy a.py to b.py"):
+- Request the current contents with \`\`\`read:source_path
+\`\`\` if you do not already have the full content in context.
+- Then create the new file using \`\`\`file:destination_path
+\`\`\` with the copied (or updated) contents.
+Do NOT remove the original file when the user asked for copy/duplicate — only when they clearly requested a rename/move.
 
 When the user asks to RUN or EXECUTE a script in the workspace:
 - DEFAULT: build and run in Docker for each request. Output 1) \`\`\`file:Dockerfile\`\`\` with the right base image (Python: FROM python:3.11 + RUN pip install as needed; C/C++: FROM gcc; Java: FROM openjdk), 2) \`\`\`run-docker-build:script_path\`\`\` (e.g. script.py, main.c, Main.java). If you are not sure which packages the script needs, output \`\`\`read:path\`\`\` first, then next turn output Dockerfile + run-docker-build. Do NOT use \`\`\`pip-install\`\`\` + \`\`\`run\`\`\` unless the user explicitly says "run locally" or "don't use Docker".
@@ -177,6 +212,9 @@ function App() {
   const [pendingRemoveAllPaths, setPendingRemoveAllPaths] = useState<string[]>([]);
   const [removeAllItems, setRemoveAllItems] = useState<Record<string, string[]>>({});
   const [removeAllStatus, setRemoveAllStatus] = useState<Record<string, "idle" | "done" | "err">>({});
+  const [pendingRemoveMatching, setPendingRemoveMatching] = useState<string[]>([]);
+  const [removeMatchingItems, setRemoveMatchingItems] = useState<Record<string, string[]>>({});
+  const [removeMatchingStatus, setRemoveMatchingStatus] = useState<Record<string, "idle" | "done" | "err">>({});
   const [pendingPipRequirements, setPendingPipRequirements] = useState<string[]>([]);
   const [pendingPipPackages, setPendingPipPackages] = useState<string[]>([]);
   const [pipInstallOutput, setPipInstallOutput] = useState<Record<string, RunScriptResult | null>>({});
@@ -294,8 +332,12 @@ function App() {
     }
   };
 
-  const deleteSession = (id: string) => {
-    if (!confirm(`Delete conversation permanently?`)) return;
+  const deleteSession = async (id: string) => {
+    const ok = await confirm(`Delete conversation permanently?`, {
+      title: "Delete conversation",
+      kind: "warning",
+    });
+    if (!ok) return;
     const next = sessions.filter((s) => s.id !== id);
     persistSessionsIndex(next);
     try {
@@ -458,8 +500,11 @@ function App() {
     setPendingRemoves([]);
     setPendingListPaths([]);
     setPendingRemoveAllPaths([]);
+    setPendingRemoveMatching([]);
     setRemoveAllItems({});
     setRemoveAllStatus({});
+    setRemoveMatchingItems({});
+    setRemoveMatchingStatus({});
     setPendingPipRequirements([]);
     setPendingPipPackages([]);
     setPipInstallOutput({});
@@ -572,6 +617,7 @@ function App() {
       const removes = parseRemoveEdits(resultContent);
       const listPaths = parseListRequests(resultContent);
       const removeAllPaths = parseRemoveAllRequests(resultContent);
+      const removeMatchingPatterns = parseRemoveMatchingRequests(resultContent);
       const pipReqsRaw = parseInstallRequirements(resultContent);
       const pipPkgs = parsePipInstall(resultContent);
       const pipReqPaths = pipReqsRaw.filter(looksLikeRequirementsFilePath);
@@ -619,6 +665,47 @@ function App() {
         setPendingRemoveAllPaths([]);
         setRemoveAllItems({});
         setRemoveAllStatus({});
+      }
+
+      if (removeMatchingPatterns.length > 0 && workspaceRoot) {
+        setPendingRemoveMatching(removeMatchingPatterns);
+        const items: Record<string, string[]> = {};
+        for (const rawPattern of removeMatchingPatterns) {
+          let dir = ".";
+          let glob = rawPattern;
+          const lastSlash = rawPattern.lastIndexOf("/");
+          if (lastSlash !== -1) {
+            dir = rawPattern.slice(0, lastSlash) || ".";
+            glob = rawPattern.slice(lastSlash + 1);
+          }
+          // Normalize bare extensions like ".mp4" to "*.mp4".
+          if (/^\.[A-Za-z0-9]+$/.test(glob)) {
+            glob = `*${glob}`;
+          }
+          const extMatch = glob.match(/(\.[A-Za-z0-9]+)$/);
+          try {
+            const names = await listWorkspaceDir(workspaceRoot, dir);
+            const matched = names
+              .filter((name) => {
+                if (extMatch) {
+                  // When a file extension is present (e.g. .mp4), match purely by extension
+                  // so patterns like ".mp4" or "*.mp4" always catch files ending in that ext.
+                  return name.toLowerCase().endsWith(extMatch[1].toLowerCase());
+                }
+                return matchesSimpleGlob(name, glob);
+              })
+              .map((name) => (dir === "." ? name : `${dir}/${name}`));
+            items[rawPattern] = matched;
+          } catch {
+            items[rawPattern] = [];
+          }
+        }
+        setRemoveMatchingItems(items);
+        setRemoveMatchingStatus({});
+      } else {
+        setPendingRemoveMatching([]);
+        setRemoveMatchingItems({});
+        setRemoveMatchingStatus({});
       }
       const runPaths = parseRunRequests(resultContent);
       if (runPaths.length) setPendingRunPaths(runPaths);
@@ -1262,6 +1349,32 @@ function App() {
     refreshWorkspaceFiles();
   };
 
+  const applyRemoveMatching = async (pattern: string) => {
+    if (!workspaceRoot) return;
+    const names = removeMatchingItems[pattern] || [];
+    if (names.length === 0) {
+      setRemoveMatchingStatus((s) => ({ ...s, [pattern]: "done" }));
+      setPendingRemoveMatching((p) => p.filter((x) => x !== pattern));
+      return;
+    }
+    const preview = names.slice(0, 15).join(", ") + (names.length > 15 ? "…" : "");
+    const ok = await confirm(
+      `Remove all ${names.length} file(s) matching "${pattern}"? This cannot be undone.\n\n${preview}`,
+      { title: "Remove matching", kind: "warning" }
+    );
+    if (!ok) return;
+    let err = false;
+    for (const fullPath of names) {
+      try {
+        await removeWorkspaceFile(workspaceRoot, fullPath);
+      } catch {
+        err = true;
+      }
+    }
+    setRemoveMatchingStatus((s) => ({ ...s, [pattern]: err ? "err" : "done" }));
+    refreshWorkspaceFiles();
+  };
+
   return (
     <main className="app">
       <header className="header">
@@ -1393,17 +1506,21 @@ function App() {
             <div className="help-block">
               <h3>What you can ask for</h3>
               <ul>
-                <li><strong>Create/save a file</strong> → model outputs <code>file:path</code>; you Apply to write.</li>
-                <li><strong>Remove a file</strong> → <code>remove:path</code>; confirm to delete.</li>
-                <li><strong>List files</strong> → <code>list:.</code> or <code>list:subfolder</code>; app shows the real list.</li>
-                <li><strong>Remove all</strong> → <code>remove-all:.</code>; confirm to clear.</li>
-                <li><strong>Read a file</strong> → <code>read:path</code>; app reads and sends content in a follow-up turn.</li>
-                <li><strong>Run a script</strong> → <code>run:path</code>; use the Suggested runs Run button (or Run file in workspace).</li>
-                <li><strong>Run in Docker</strong> → <code>run-docker:image path</code> (e.g. <code>run-docker:python:3.11 script.py</code>); workspace is mounted at /workspace. Docker must be installed.</li>
-                <li><strong>Reproducible (build + run)</strong> → <code>run-docker-build:script</code> (e.g. script.py, main.c, Main.java); builds image from workspace Dockerfile then runs (or compiles and runs) the script. Put a Dockerfile in the workspace first (or ask the agent to create one).</li>
-                <li><strong>Install deps</strong> → <code>install-requirements:requirements.txt</code> or <code>pip-install: pkg1 pkg2</code>; runs automatically. If the workspace has a <code>.venv</code>, pip and Python scripts use it.</li>
-                <li><strong>Python virtual env</strong> → <code>create-venv:.venv</code>; app creates a venv. After that, pip installs and Python runs use it automatically.</li>
-                <li><strong>Script that needs packages</strong> — Ask e.g. &quot;a script that uses requests&quot;; with <strong>Auto-apply &amp; run</strong> on, the agent will create venv → install deps → create script → run it in order.</li>
+              <li><strong>Create/save a file</strong> → model outputs <code>file:path</code>; you Apply to write.</li>
+              <li><strong>Edit a file</strong> → the agent either rewrites the whole file with <code>file:path</code> or first asks for <code>read:path</code> then sends the updated file contents.</li>
+              <li><strong>Remove a file</strong> → <code>remove:path</code>; confirm to delete.</li>
+              <li><strong>Remove by pattern</strong> → ask e.g. “delete all *.mp4 files in videos”; the agent uses <code>remove-matching:pattern</code>, shows the matching files, and asks for confirmation before deleting.</li>
+              <li><strong>Rename/move a file</strong> → ask e.g. “rename a.py to b.py”; the agent will read the original, write the new file, then (optionally) delete the old one.</li>
+              <li><strong>Copy/duplicate a file</strong> → ask e.g. “copy a.py to b.py”; the agent will read the original and write a new file without deleting the source.</li>
+              <li><strong>List files</strong> → <code>list:.</code> or <code>list:subfolder</code>; app shows the real list.</li>
+              <li><strong>Remove all</strong> → <code>remove-all:.</code>; confirm to clear.</li>
+              <li><strong>Read a file</strong> → <code>read:path</code>; app reads and sends content in a follow-up turn.</li>
+              <li><strong>Run a script</strong> → <code>run:path</code>; use the Suggested runs Run button (or Run file in workspace).</li>
+              <li><strong>Run in Docker</strong> → <code>run-docker:image path</code> (e.g. <code>run-docker:python:3.11 script.py</code>); workspace is mounted at /workspace. Docker must be installed.</li>
+              <li><strong>Reproducible (build + run)</strong> → <code>run-docker-build:script</code> (e.g. script.py, main.c, Main.java); builds image from workspace Dockerfile then runs (or compiles and runs) the script. Put a Dockerfile in the workspace first (or ask the agent to create one).</li>
+              <li><strong>Install deps</strong> → <code>install-requirements:requirements.txt</code> or <code>pip-install: pkg1 pkg2</code>; runs automatically. If the workspace has a <code>.venv</code>, pip and Python scripts use it.</li>
+              <li><strong>Python virtual env</strong> → <code>create-venv:.venv</code>; app creates a venv. After that, pip installs and Python runs use it automatically.</li>
+              <li><strong>Script that needs packages</strong> — Ask e.g. &quot;a script that uses requests&quot;; with <strong>Auto-apply &amp; run</strong> on, the agent will create venv → install deps → create script → run it in order.</li>
               </ul>
             </div>
             <div className="help-block">
@@ -1762,6 +1879,31 @@ function App() {
                     disabled={status === "done"}
                   >
                     {status === "done" ? "Removed" : status === "err" ? "Some errors" : "Remove all"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {pendingRemoveMatching.length > 0 && workspaceRoot && (
+          <div className="pending-edits remove-all-section">
+            <h3>Remove matching files</h3>
+            {pendingRemoveMatching.map((pattern) => {
+              const names = removeMatchingItems[pattern] || [];
+              const status = removeMatchingStatus[pattern];
+              return (
+                <div key={pattern} className="edit-card">
+                  <code className="edit-path">{pattern}</code>
+                  <p className="remove-all-count">{names.length} match(es): {names.join(", ") || "(none)"}</p>
+                  <button
+                    type="button"
+                    className="btn small"
+                    onClick={() => applyRemoveMatching(pattern)}
+                    disabled={status === "done"}
+                    title="Remove all files that match this pattern"
+                  >
+                    {status === "done" ? "Removed" : status === "err" ? "Some errors" : "Remove matching"}
                   </button>
                 </div>
               );
