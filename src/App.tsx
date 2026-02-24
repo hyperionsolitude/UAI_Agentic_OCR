@@ -137,6 +137,7 @@ type ChatSessionMeta = {
   title: string;
   createdAt: number;
   updatedAt: number;
+  workspaceRoot?: string | null;
 };
 
 function App() {
@@ -240,12 +241,25 @@ function App() {
     let nextSessions = sessions;
     if (!id) {
       id = String(now);
-      const meta: ChatSessionMeta = { id, title, createdAt: now, updatedAt: now };
+      const meta: ChatSessionMeta = {
+        id,
+        title,
+        createdAt: now,
+        updatedAt: now,
+        workspaceRoot: workspaceRoot ?? null,
+      };
       nextSessions = [meta, ...sessions];
       setCurrentSessionId(id);
     } else {
       nextSessions = sessions.map((s) =>
-        s.id === id ? { ...s, title, updatedAt: now } : s
+        s.id === id
+          ? {
+              ...s,
+              title,
+              updatedAt: now,
+              workspaceRoot: workspaceRoot ?? null,
+            }
+          : s
       );
     }
     persistSessionsIndex(nextSessions);
@@ -259,10 +273,16 @@ function App() {
   const startNewSession = () => {
     setCurrentSessionId(null);
     setMessages([]);
+    setWorkspaceRoot(null);
   };
 
   const openSession = (id: string) => {
+    const meta = sessions.find((s) => s.id === id);
     setCurrentSessionId(id);
+    if (meta) {
+      const nextWorkspace = meta.workspaceRoot ?? null;
+      setWorkspaceRoot(nextWorkspace);
+    }
   };
 
   const deleteSession = (id: string) => {
@@ -277,6 +297,7 @@ function App() {
     if (currentSessionId === id) {
       setCurrentSessionId(null);
       setMessages([]);
+      setWorkspaceRoot(null);
     }
   };
 
@@ -293,13 +314,19 @@ function App() {
     localStorage.setItem(STORAGE_MODEL, v);
   };
 
+  const clearWorkspace = () => {
+    setWorkspaceRoot(null);
+  };
+
   const pickWorkspace = async () => {
     const selected = await open({
       directory: true,
       multiple: false,
     });
     const path = Array.isArray(selected) ? selected[0] : selected;
-    if (path && typeof path === "string") setWorkspaceRoot(path);
+    if (path && typeof path === "string") {
+      setWorkspaceRoot(path);
+    }
   };
 
   // Load messages for current session on mount / when session changes
@@ -1289,6 +1316,16 @@ function App() {
           <button type="button" onClick={pickWorkspace} className="btn">
             {workspaceRoot ? "Workspace: " + workspaceRoot.replace(/^.*[/\\]/, "") : "Pick workspace"}
           </button>
+          {workspaceRoot && (
+            <button
+              type="button"
+              onClick={clearWorkspace}
+              className="btn small"
+              title="Clear selected workspace"
+            >
+              Clear workspace
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShowHelp((v) => !v)}
