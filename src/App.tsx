@@ -168,6 +168,34 @@ const STORAGE_SESSIONS_INDEX = "agentic-ocr-gpt-sessions";
 const STORAGE_SESSION_PREFIX = "agentic-ocr-gpt-session:";
 const STORAGE_EXPERT_MODE = "agentic-ocr-gpt-expert-mode";
 
+const MAX_HISTORY_MESSAGES = 20;
+/** When retrying after rate/token limit, use only this many recent messages to reduce token usage. */
+const SHORT_CONTEXT_MESSAGES = 6;
+
+/** Heuristic: error is due to rate limit or context/token limit. */
+function isRateOrTokenLimitError(err: unknown): boolean {
+  const s = err instanceof Error ? err.message : String(err);
+  return (
+    /rate limit/i.test(s) ||
+    /tokens per minute/i.test(s) ||
+    /TPM/i.test(s) ||
+    /context length/i.test(s) ||
+    /maximum context/i.test(s) ||
+    /too many tokens/i.test(s)
+  );
+}
+
+/** If the error message contains "try again in X.XXs", return that number (seconds); else default. */
+function retryDelaySeconds(err: unknown, defaultSec: number): number {
+  const s = err instanceof Error ? err.message : String(err);
+  const m = s.match(/try again in ([\d.]+)s/i);
+  if (m) {
+    const n = parseFloat(m[1]);
+    if (Number.isFinite(n) && n > 0) return Math.ceil(n);
+  }
+  return defaultSec;
+}
+
 type ChatSessionMeta = {
   id: string;
   title: string;
@@ -263,6 +291,7 @@ function App() {
   const [autoRunStatus, setAutoRunStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [rateLimitRetryMessage, setRateLimitRetryMessage] = useState<string | null>(null);
 
   const setExpertMode = (v: boolean) => {
     setExpertModeState(v);
@@ -478,7 +507,12 @@ function App() {
     e.target.value = "";
   };
 
-  const send = async (overrideText?: string, isResubmit?: boolean) => {
+  const windowMessages = (msgs: Message[]): Message[] => {
+    if (msgs.length <= MAX_HISTORY_MESSAGES) return msgs;
+    return msgs.slice(-MAX_HISTORY_MESSAGES);
+  };
+
+  const send = async (overrideText?: string, isResubmit?: boolean, useShortContext = false) => {
     const text = ((isResubmit ? overrideText : input.trim()) ?? "").trim();
     if (!text || !apiKey) return;
     if (!isResubmit) {
@@ -548,10 +582,13 @@ function App() {
       if (workspaceRoot && systemPrompt) {
         try {
           const rootFiles = await listWorkspaceDir(workspaceRoot, ".");
+          const displayFiles = rootFiles.slice(0, 30);
+          const extraCount = rootFiles.length - displayFiles.length;
           systemPrompt =
             systemPrompt +
             "\n\nCurrent workspace root files: " +
-            rootFiles.join(", ") +
+            displayFiles.join(", ") +
+            (extraCount > 0 ? ` (and ${extraCount} more)` : "") +
             ". When the user asks to run or open a script, use the exact file name from this list (e.g. if script.py is listed, output run:script.py). Do not ask them to replace with the actual name.";
         } catch {
           /* keep prompt as is */
@@ -559,10 +596,13 @@ function App() {
       }
       const userMessage: Message = { role: "user", content: text };
       const baseMessages = isResubmit ? messages.slice(0, -1) : messages;
+      const history = useShortContext
+        ? baseMessages.slice(-SHORT_CONTEXT_MESSAGES)
+        : windowMessages(baseMessages);
       const chatMessages: Message[] = [
         ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-        ...baseMessages,
-        ...(isResubmit ? [] : [userMessage]),
+        ...history,
+        ...(isResubmit && !useShortContext ? [] : [userMessage]),
       ];
       if (!isResubmit) setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
       let resultContent: string;
@@ -962,6 +1002,18 @@ function App() {
         }
       }
     } catch (err) {
+      if (isRateOrTokenLimitError(err)) {
+        const delaySec = retryDelaySeconds(err, 8);
+        setRateLimitRetryMessage(
+          `Rate/token limit reached. Retrying with shortened context (last ${SHORT_CONTEXT_MESSAGES} messages) in ${delaySec}s…`
+        );
+        setLoading(false);
+        setTimeout(() => {
+          setRateLimitRetryMessage(null);
+          send(text, true, true);
+        }, delaySec * 1000);
+        return;
+      }
       const errContent = "Error: " + (err instanceof Error ? err.message : String(err));
       setLastFailedUserMessage(text);
       setMessages((prev) => {
@@ -1204,25 +1256,25 @@ function App() {
   const buildToolResultsSummary = (): string => {
     const parts: string[] = [];
     Object.entries(listResults).forEach(([path, names]) => {
-      parts.push(`List ${path}: ${names.length ? names.join(", ") : "(empty)"}`);
+      parts.push(`List ${path}: ${names.length ? `${names.length} item(s)` : "(empty)"}`);
     });
     Object.entries(runRequestOutput).forEach(([path, out]) => {
       if (out == null) return;
-      parts.push(`Run ${path}: exit ${out.exit_code}${out.stdout ? "\nstdout:\n" + out.stdout : ""}${out.stderr ? "\nstderr:\n" + out.stderr : ""}`);
+      parts.push(`Run ${path}: exit ${out.exit_code}`);
     });
     Object.entries(runDockerOutput).forEach(([key, out]) => {
       if (out == null) return;
       const [img, path] = key.includes("|") ? key.split("|") : ["", key];
-      parts.push(`Docker ${img} ${path}: exit ${out.exit_code}${out.stdout ? "\nstdout:\n" + out.stdout : ""}${out.stderr ? "\nstderr:\n" + out.stderr : ""}`);
+      parts.push(`Docker ${img} ${path}: exit ${out.exit_code}`);
     });
     Object.entries(runDockerBuildOutput).forEach(([key, out]) => {
       if (out == null) return;
-      parts.push(`Docker build+run ${key}: exit ${out.exit_code}${out.stdout ? "\nstdout:\n" + out.stdout : ""}${out.stderr ? "\nstderr:\n" + out.stderr : ""}`);
+      parts.push(`Docker build+run ${key}: exit ${out.exit_code}`);
     });
     Object.entries(pipInstallOutput).forEach(([key, out]) => {
       if (out == null) return;
       const label = key.startsWith("req:") ? `pip -r ${key.slice(4)}` : `pip ${key.slice(4)}`;
-      parts.push(`${label}: exit ${out.exit_code}${out.stderr ? "\n" + out.stderr : ""}`);
+      parts.push(`${label}: exit ${out.exit_code}`);
     });
     pendingEdits.forEach((edit, i) => {
       if (applyStatus[i] === "ok") {
@@ -1243,7 +1295,7 @@ function App() {
     Object.keys(pipInstallOutput).some((k) => pipInstallOutput[k] != null) ||
     pendingEdits.some((_, i) => applyStatus[i] === "ok");
 
-  const sendContinue = async () => {
+  const sendContinue = async (useShortContext = false) => {
     if (!apiKey || !hasToolResults) return;
     const toolSummary = buildToolResultsSummary();
     const userMessage: Message = { role: "user", content: toolSummary };
@@ -1263,9 +1315,12 @@ function App() {
           "\n\nExpert mode: You may freely choose among the available actions (file:, list:, remove:, remove-all:, pip-install:, install-requirements:, run:, run-docker:, run-docker-build:, create-venv:) to best satisfy the user's request, instead of following any default preference (e.g. always using Docker). Always keep to the defined block formats and safety rules (no wildcards for remove:, no shell commands in run:, no new block types).";
       }
     }
+    const history = useShortContext
+      ? messages.slice(-SHORT_CONTEXT_MESSAGES)
+      : windowMessages(messages);
     const chatMessages: Message[] = [
       ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
-      ...messages,
+      ...history,
       userMessage,
     ];
     try {
@@ -1310,6 +1365,18 @@ function App() {
         if (result.usage) setLastUsage(result.usage);
       }
     } catch (err) {
+      if (isRateOrTokenLimitError(err)) {
+        const delaySec = retryDelaySeconds(err, 8);
+        setRateLimitRetryMessage(
+          `Rate/token limit reached. Retrying Continue with shortened context in ${delaySec}s…`
+        );
+        setLoading(false);
+        setTimeout(() => {
+          setRateLimitRetryMessage(null);
+          sendContinue(true);
+        }, delaySec * 1000);
+        return;
+      }
       setMessages((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
@@ -2012,12 +2079,18 @@ function App() {
             <button
               type="button"
               className="btn small"
-              onClick={sendContinue}
+              onClick={() => sendContinue()}
               disabled={loading}
               title="Send tool results (list/run/pip/applied edits) back to the model for a follow-up reply"
             >
               {loading ? "…" : "Continue (multi-step)"}
             </button>
+          </div>
+        )}
+
+        {rateLimitRetryMessage && (
+          <div className="rate-limit-retry-banner" role="status">
+            {rateLimitRetryMessage}
           </div>
         )}
 
